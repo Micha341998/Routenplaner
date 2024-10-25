@@ -1,0 +1,331 @@
+<html><head><base href="." /><meta content="text/html; charset=UTF-8" http-equiv="content-type">
+<title>Routenplaner mit OpenStreetMap</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+<style>
+    body { 
+        margin: 0; 
+        padding: 20px;
+        font-family: Arial, sans-serif;
+    }
+    #map { 
+        height: 600px; 
+        width: 100%;
+        margin-top: 20px;
+    }
+    .input-container {
+        margin-bottom: 20px;
+    }
+    .address-list {
+        max-height: 200px;
+        overflow-y: auto;
+        margin-bottom: 20px;
+    }
+    .address-item {
+        padding: 5px;
+        margin: 5px 0;
+        background-color: #f0f0f0;
+        border-radius: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .delete-btn {
+        background-color: #ff4444;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 5px 10px;
+        cursor: pointer;
+    }
+    .delete-btn:hover {
+        background-color: #cc0000;
+    }
+    .controls {
+        margin-bottom: 20px;
+    }
+    button {
+        padding: 10px 20px;
+        margin-right: 10px;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+    }
+    #nextStop {
+        display: none;
+    }
+</style>
+</head>
+<body>
+    <div class="input-container">
+        <input type="text" id="addressInput" placeholder="Adresse eingeben" style="width: 300px; padding: 5px;">
+        <button onclick="addAddress()">Adresse hinzufügen</button>
+    </div>
+
+    <div id="addressList" class="address-list"></div>
+
+    <div class="controls">
+        <button onclick="optimizeRoute()">Route optimieren</button>
+        <button onclick="startNavigation()" id="startNav" disabled>Navigation starten</button>
+        <button onclick="nextStop()" id="nextStop">Nächster Stopp</button>
+    </div>
+
+    <div id="map"></div>
+
+<script>
+let addresses = [];
+let optimizedRoute = [];
+let currentStopIndex = 0;
+let markers = [];
+let routeLayer;
+let map;
+
+// Karte initialisieren
+function initMap() {
+    map = L.map('map').setView([51.1657, 10.4515], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+}
+
+// Adresse zur Liste hinzufügen
+async function addAddress() {
+    const address = document.getElementById('addressInput').value;
+    if (address.trim() === '') return;
+
+    try {
+        const coords = await geocodeAddress(address);
+        addresses.push({
+            address: address,
+            coords: coords
+        });
+        updateAddressList();
+        addMarker(coords, addresses.length);
+        document.getElementById('addressInput').value = '';
+    } catch (error) {
+        alert('Adresse konnte nicht gefunden werden');
+    }
+}
+
+// Adresse löschen
+function deleteAddress(index) {
+    addresses.splice(index, 1);
+    updateAddressList();
+    updateMap();
+    document.getElementById('startNav').disabled = true;
+}
+
+// Karte aktualisieren nach Löschung
+function updateMap() {
+    clearMap();
+    addresses.forEach((addr, i) => {
+        addMarker(addr.coords, i + 1);
+    });
+}
+
+// Adresse zu Koordinaten umwandeln
+async function geocodeAddress(address) {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`);
+    const data = await response.json();
+    if (data.length === 0) throw new Error('Address not found');
+    return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+}
+
+// Addressliste aktualisieren
+function updateAddressList() {
+    const list = document.getElementById('addressList');
+    list.innerHTML = '';
+    addresses.forEach((addr, i) => {
+        const div = document.createElement('div');
+        div.className = 'address-item';
+        
+        const addressText = document.createElement('span');
+        addressText.textContent = `${i + 1}. ${addr.address}`;
+        
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'delete-btn';
+        deleteButton.textContent = 'Löschen';
+        deleteButton.onclick = () => deleteAddress(i);
+        
+        div.appendChild(addressText);
+        div.appendChild(deleteButton);
+        list.appendChild(div);
+    });
+}
+
+// Marker zur Karte hinzufügen
+function addMarker(coords, number) {
+    const marker = L.marker(coords);
+    marker.bindPopup(`Stopp ${number}`);
+    markers.push(marker);
+    marker.addTo(map);
+}
+
+// Route optimieren
+async function optimizeRoute() {
+    if (addresses.length < 2) return;
+
+    // Einfache Implementierung des Nearest Neighbor Algorithmus
+    let unvisited = [...addresses];
+    optimizedRoute = [unvisited[0]];
+    unvisited.splice(0, 1);
+
+    while (unvisited.length > 0) {
+        const current = optimizedRoute[optimizedRoute.length - 1];
+        let nearest = 0;
+        let minDist = Infinity;
+
+        unvisited.forEach((addr, i) => {
+            const dist = distance(current.coords, addr.coords);
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = i;
+            }
+        });
+
+        optimizedRoute.push(unvisited[nearest]);
+        unvisited.splice(nearest, 1);
+    }
+
+    // Karte aktualisieren
+    clearMap();
+    drawOptimizedRoute();
+    document.getElementById('startNav').disabled = false;
+}
+
+// Distanz zwischen zwei Punkten berechnen
+function distance(coord1, coord2) {
+    return Math.sqrt(
+        Math.pow(coord1[0] - coord2[0], 2) + 
+        Math.pow(coord1[1] - coord2[1], 2)
+    );
+}
+
+// Karte bereinigen
+function clearMap() {
+    markers.forEach(marker => marker.remove());
+    markers = [];
+    if (routeLayer) map.removeLayer(routeLayer);
+}
+
+// Optimierte Route zeichnen
+function drawOptimizedRoute() {
+    optimizedRoute.forEach((addr, i) => {
+        addMarker(addr.coords, i + 1);
+    });
+
+    const routeCoords = optimizedRoute.map(addr => addr.coords);
+    if (routeLayer) map.removeLayer(routeLayer);
+    
+    routeLayer = L.polyline(routeCoords, {color: 'blue'}).addTo(map);
+    map.fitBounds(routeLayer.getBounds());
+}
+
+// Navigation starten
+function startNavigation() {
+    currentStopIndex = 0;
+    document.getElementById('startNav').style.display = 'none';
+    document.getElementById('nextStop').style.display = 'inline';
+    navigateToCurrentStop();
+}
+
+// Zum nächsten Stopp
+function nextStop() {
+    currentStopIndex++;
+    if (currentStopIndex >= optimizedRoute.length) {
+        alert('Route beendet!');
+        document.getElementById('nextStop').style.display = 'none';
+        document.getElementById('startNav').style.display = 'inline';
+        return;
+    }
+    navigateToCurrentStop();
+}
+
+// Zum aktuellen Stopp navigieren
+function navigateToCurrentStop() {
+    const currentStop = optimizedRoute[currentStopIndex];
+    map.setView(currentStop.coords, 15);
+    markers[currentStopIndex].openPopup();
+    
+    // Öffne die Navigation in einem neuen Tab mit Google Maps
+    const nextDestination = optimizedRoute[currentStopIndex];
+    const coords = nextDestination.coords;
+    const navigationUrl = `https://www.google.com/maps/dir/?api=1&destination=${coords[0]},${coords[1]}&travelmode=driving`;
+    window.open(navigationUrl, '_blank');
+}
+
+// Karte initialisieren
+initMap();
+</script>
+
+</body>
+</html>
+
+Die wichtigsten Änderungen sind:
+
+1. Neuer CSS-Style für den Löschen-Button:
+```css
+.delete-btn {
+    background-color: #ff4444;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+```
+
+2. Neue Funktion zum Löschen einer Adresse:
+```javascript
+function deleteAddress(index) {
+    addresses.splice(index, 1);
+    updateAddressList();
+    updateMap();
+    document.getElementById('startNav').disabled = true;
+}
+```
+
+3. Aktualisierte `updateAddressList()`-Funktion, die jetzt auch den Löschen-Button enthält:
+```javascript
+function updateAddressList() {
+    const list = document.getElementById('addressList');
+    list.innerHTML = '';
+    addresses.forEach((addr, i) => {
+        const div = document.createElement('div');
+        div.className = 'address-item';
+        
+        const addressText = document.createElement('span');
+        addressText.textContent = `${i + 1}. ${addr.address}`;
+        
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'delete-btn';
+        deleteButton.textContent = 'Löschen';
+        deleteButton.onclick = () => deleteAddress(i);
+        
+        div.appendChild(addressText);
+        div.appendChild(deleteButton);
+        list.appendChild(div);
+    });
+}
+```
+
+4. Neue Funktion zum Aktualisieren der Karte nach dem Löschen:
+```javascript
+function updateMap() {
+    clearMap();
+    addresses.forEach((addr, i) => {
+        addMarker(addr.coords, i + 1);
+    });
+}
+```
+
+Jetzt kann man jede Adresse einzeln löschen, und sowohl die Liste als auch die Karte werden automatisch aktualisiert. Nach dem Löschen einer Adresse wird der "Navigation starten" Button deaktiviert, da die Route neu optimiert werden muss.
